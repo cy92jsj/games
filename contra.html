@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>馃幃 Contra 瀹屾暣鐗?/title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; }
+  canvas { border: 2px solid #555; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 480;
+canvas.width = W; canvas.height = H;
+const s = Math.min(window.innerWidth/W, window.innerHeight/H) * 0.95;
+canvas.style.width = W*s+'px'; canvas.style.height = H*s+'px';
+
+// ============ 甯搁噺 ============
+const GROUND = H - 60;
+const DEATH_Y = H + 50; // 鎺夊嚭灞忓箷鍗虫
+
+// ============ 娓告垙鐘舵€?============
+let score = 0, lives = 3, bossKills = 0;
+let paused = false, frame = 0;
+let bossActive = false;
+let cameraX = 0; // 涓栫晫鍧愭爣鍋忕Щ
+const WORLD_W = 2400; // 鍏冲崱鎬婚暱搴?
+// ============ 杈撳叆 ============
+const keys = {};
+onkeydown = e => { keys[e.code] = true; if (e.code === 'KeyR') restart(); if (e.code === 'KeyP') paused = !paused; e.preventDefault(); };
+onkeyup = e => { keys[e.code] = false; e.preventDefault(); };
+
+// ============ 骞冲彴 ============
+const platforms = []; // { x, y, w, h }
+function buildPlatforms() {
+  platforms.length = 0;
+  // 鍦伴潰鏄?GROUND 绾匡紝鎵€鏈夊疄浣撶鎾炰娇鐢?platforms
+  // 娴┖骞冲彴
+  platforms.push({ x: 300, y: GROUND-82, w: 120, h: 14 });
+  platforms.push({ x: 550, y: GROUND-140, w: 100, h: 14 });
+  platforms.push({ x: 720, y: GROUND-100, w: 140, h: 14 });
+  platforms.push({ x: 950, y: GROUND-160, w: 90, h: 14 });
+  platforms.push({ x: 1100, y: GROUND-100, w: 130, h: 14 });
+  platforms.push({ x: 1350, y: GROUND-180, w: 100, h: 14 });
+  platforms.push({ x: 1550, y: GROUND-130, w: 120, h: 14 });
+  platforms.push({ x: 1750, y: GROUND-80, w: 100, h: 14 });
+  platforms.push({ x: 1900, y: GROUND-150, w: 110, h: 14 });
+  platforms.push({ x: 2100, y: GROUND-100, w: 130, h: 14 });
+  // 瑁傚彛锛堟棤骞冲彴 = 鎺変笅鍘伙級
+  // platform gaps at certain x ranges, players fall into pit
+}
+buildPlatforms();
+
+// 妫€鏌ユ煇涓獂,y浣嶇疆涓嬫柟鏄惁鏈夋敮鎾?function findGround(x, y) {
+  // 妫€鏌ユ诞绌哄钩鍙?  for (const p of platforms) {
+    if (x >= p.x-2 && x <= p.x+p.w+2 && y <= p.y && y + 40 >= p.y-4) {
+      return p.y;
+    }
+  }
+  // 鍦伴潰
+  return GROUND;
+}
+
+// ============ 鐜╁ ============
+const player = {
+  x: 80, y: GROUND-40, w: 28, h: 40,
+  vx: 0, vy: 0, grounded: false,
+  facing: 1, cooldown: 0, cdMax: 12,
+  invincible: 0, invMax: 0, // 0=姝ｅ父, >0=鍙椾激鏃犳晫, >999=涓存椂鏃犳晫閬撳叿
+  speed: 5,
+  doubleJump: false, jumped: false,
+};
+
+function resetPlayer() {
+  player.x = 80; player.y = GROUND-40; player.vx = 0; player.vy = 0;
+  player.grounded = false; player.facing = 1; player.cooldown = 0;
+  player.invincible = 0; player.invMax = 0; player.speed = 5;
+  player.doubleJump = false; player.jumped = false;
+  cameraX = 0;
+}
+
+// ============ 瀛愬脊 ============
+let bullets = [];
+function fire() {
+  if (player.cooldown > 0 || player.invincible > 999) return;
+  player.cooldown = player.cdMax;
+  const bx = player.facing>0 ? player.x+player.w : player.x-6;
+  const by = player.y + player.h*0.35;
+  bullets.push({ x:bx, y:by, w:6, h:3, vx:player.facing*10, vy:0, life:60 });
+  // 鎵╁睍鐏姏锛堟瘡鏉€5涓狟oss澶氫竴鍙戯級
+  if (bossKills >= 1) bullets.push({ x:bx, y:by-8, w:6, h:3, vx:player.facing*10, vy:0, life:60 });
+  if (bossKills >= 3) bullets.push({ x:bx, y:by+8, w:6, h:3, vx:player.facing*10, vy:0, life:60 });
+}
+
+// ============ 鏁屼汉 ============
+let enemies = [];
+let enemyBullets = [];
+let spawnTimer = 0;
+let bossTimeout = 0; // Boss鍑哄満璁℃椂鍣?
+function addEnemy(type) {
+  const ex = cameraX + W + 50 + Math.random()*200;
+  const groundY = findGround(ex, GROUND-40);
+  const defs = {
+    runner:  { w:26,h:38,hp:1,spd:-2,  score:100,color:'#e74c3c',name:'澹叺' },
+    soldier: { w:26,h:38,hp:2,spd:-1.2,score:200,color:'#c0392b',name:'鏋叺',shoot:60 },
+    turret:  { w:32,h:26,hp:4,spd:0,   score:300,color:'#8e44ad',name:'鐐彴',shoot:50,isTurret:true },
+    elite:   { w:30,h:42,hp:5,spd:-1,  score:500,color:'#e67e22',name:'绮捐嫳',shoot:35,dropRate:0.5 },
+  };
+  const t = defs[type];
+  enemies.push({ ...t, type, x: ex, y: t.isTurret ? groundY-t.h : groundY-t.h, timer: 0, maxHp: t.hp });
+}
+
+function spawnBoss() {
+  if (bossActive) return;
+  bossActive = true;
+  const bx = cameraX + W + 100;
+  enemies.push({
+    type: 'boss', name: 'BOSS',
+    x: bx, y: GROUND-80, w: 64, h: 80, hp: 30 + bossKills*15,
+    maxHp: 30 + bossKills*15, spd: -0.3, score: 2000 + bossKills*500,
+    color: '#e74c3c', shoot: 30, timer: 0, isBoss: true, dropRate: 1,
+  });
+}
+
+function enemyShoot(e) {
+  const dx = player.x - (e.x+e.w/2);
+  const dy = player.y - (e.y+e.h/2);
+  const d = Math.sqrt(dx*dx+dy*dy) || 1;
+  enemyBullets.push({ x:e.x+e.w/2, y:e.y+e.h/2, w:5,h:5, vx:dx/d*4, vy:dy/d*4, life:120 });
+  // Boss澶氭柟鍚戝皠鍑?  if (e.isBoss) {
+    for (let a = -0.3; a <= 0.3; a += 0.3) {
+      const angle = Math.atan2(dy, dx) + a;
+      enemyBullets.push({ x:e.x+e.w/2, y:e.y+e.h/2, w:5,h:5, vx:Math.cos(angle)*4, vy:Math.sin(angle)*4, life:120 });
+    }
+  }
+}
+
+// ============ 閬撳叿 ============
+let powerups = [];
+function dropPowerup(x, y) {
+  const types = ['health', 'speed', 'invincible'];
+  powerups.push({
+    x, y, w: 22, h: 22, vy: -4,
+    type: types[Math.floor(Math.random()*types.length)],
+    life: 400
+  });
+}
+
+// ============ 绮掑瓙 ============
+let particles = [];
+function boom(x, y, color, n=8) {
+  for (let i=0; i<n; i++) particles.push({
+    x, y, color, life:1, vx:(Math.random()-.5)*8, vy:(Math.random()-.5)*8-2, size:Math.random()*4+2
+  });
+}
+
+// ============ 纰版挒 ============
+function rectHit(a, b) {
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+// ============ 鏇存柊 ============
+function update() {
+  if (paused) return;
+  frame++;
+
+  // --- 鐜╁绉诲姩 ---
+  let mx = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'])  mx = -1;
+  if (keys['ArrowRight'] || keys['KeyD']) mx = 1;
+  player.vx = mx * player.speed;
+  if (mx !== 0) player.facing = mx;
+
+  // 璺宠穬
+  if ((keys['Space'] || keys['KeyW'] || keys['ArrowUp'])) {
+    if (player.grounded) {
+      player.vy = -13;
+      player.grounded = false;
+      player.jumped = true;
+    } else if (player.doubleJump && player.jumped) {
+      // 浜屾璺?      player.vy = -10;
+      player.jumped = false;
+      boom(player.x+player.w/2, player.y+player.h, '#fff', 5);
+    }
+  } else {
+    if (player.grounded) player.jumped = false;
+  }
+
+  // 閲嶅姏
+  player.vy += 0.7;
+  player.x += player.vx;
+  player.y += player.vy;
+
+  // 杈圭晫
+  player.x = Math.max(0, Math.min(player.x, WORLD_W - player.w));
+
+  // 骞冲彴纰版挒
+  player.grounded = false;
+  // 妫€鏌ユ诞绌哄钩鍙?  for (const p of platforms) {
+    if (player.x+player.w > p.x && player.x < p.x+p.w) {
+      if (player.vy >= 0 && player.y+player.h >= p.y && player.y+player.h-prevY <= p.y+4) {
+        // 浠庝笂钀戒笅绔欎笂鍘?        if (player.y+player.h - player.vy <= p.y+6) {
+          player.y = p.y - player.h;
+          player.vy = 0;
+          player.grounded = true;
+        }
+      }
+    }
+  }
+  const prevY = player.y - player.vy;
+  // 鍦伴潰纰版挒
+  if (player.vy >= 0 && player.y+player.h >= GROUND && player.y+player.h - player.vy <= GROUND+10) {
+    player.y = GROUND - player.h;
+    player.vy = 0;
+    player.grounded = true;
+  }
+
+  // 鎺夊叆娣辨笂
+  if (player.y > DEATH_Y) {
+    hurtPlayer(true);
+    return;
+  }
+
+  // 灏勫嚮
+  if (player.cooldown > 0) player.cooldown--;
+  if (keys['KeyJ'] || keys['KeyF']) fire();
+
+  // 鏃犳晫璁℃椂
+  if (player.invincible > 0 && player.invincible < 900) player.invincible--;
+  if (player.invMax > 0) {
+    player.invMax--;
+    if (player.invMax <= 0) player.invincible = 0;
+  }
+
+  // 鐩告満
+  const targetCX = player.x - W*0.3;
+  cameraX += (targetCX - cameraX) * 0.08;
+  cameraX = Math.max(0, Math.min(cameraX, WORLD_W - W));
+
+  // --- 瀛愬脊 ---
+  for (let i=bullets.length-1; i>=0; i--) {
+    const b = bullets[i]; b.x += b.vx; b.life--;
+    if (b.life<=0 || b.x<cameraX-20 || b.x>cameraX+W+20) bullets.splice(i,1);
+  }
+  for (let i=enemyBullets.length-1; i>=0; i--) {
+    const b = enemyBullets[i]; b.x+=b.vx; b.y+=b.vy; b.life--;
+    if (b.life<=0||b.x<cameraX-20||b.x>cameraX+W+20||b.y<-20||b.y>H+20) enemyBullets.splice(i,1);
+  }
+
+  // --- 鏁屼汉 ---
+  for (const e of enemies) {
+    if (e.spd !== 0 && !e.isTurret) e.x += e.spd;
+    e.timer++;
+    if (e.shoot && e.timer % e.shoot === 0) enemyShoot(e);
+    // 纰扮帺瀹?    if (player.invincible<=0 && rectHit(player, e)) hurtPlayer(false);
+  }
+  // 绉婚櫎姝?鍑哄睆鏁屼汉
+  for (let i=enemies.length-1; i>=0; i--) {
+    const e = enemies[i];
+    if (e.hp<=0 || e.x < cameraX-200) {
+      score += e.score;
+      boom(e.x+e.w/2, e.y+e.h/2, e.color, e.isBoss?30:15);
+      if (e.isBoss) { bossKills++; bossActive = false; }
+      // 鎺夎惤閬撳叿
+      if ((e.dropRate && Math.random() < e.dropRate) || e.isBoss)
+        dropPowerup(e.x+e.w/2, e.y);
+      enemies.splice(i,1);
+    }
+  }
+
+  // --- 瀛愬脊鍛戒腑鏁屼汉 ---
+  for (let bi=bullets.length-1; bi>=0; bi--) {
+    for (const e of enemies) {
+      if (rectHit(bullets[bi], e)) {
+        e.hp--;
+        boom(bullets[bi].x, bullets[bi].y, '#ff0', 2);
+        bullets.splice(bi,1); break;
+      }
+    }
+  }
+  // 鏁屼汉瀛愬脊鍛戒腑鐜╁
+  if (player.invincible <= 0) {
+    for (let i=enemyBullets.length-1; i>=0; i--) {
+      if (rectHit(enemyBullets[i], player)) {
+        enemyBullets.splice(i,1); hurtPlayer(false); break;
+      }
+    }
+  }
+
+  // --- 閬撳叿 ---
+  for (let i=powerups.length-1; i>=0; i--) {
+    const p = powerups[i]; p.life--;
+    if (p.life<=0) { powerups.splice(i,1); continue; }
+    // 閲嶅姏钀藉埌鏈€杩戝湴闈?    const groundY = findGround(p.x, p.y);
+    if (p.y+p.h < groundY) { p.vy+=0.5; p.y+=p.vy; }
+    else { p.y=groundY-p.h; p.vy=0; }
+    if (rectHit(player, p)) {
+      if (p.type==='health') lives = Math.min(lives+1, 9);
+      if (p.type==='speed') player.speed = Math.min(player.speed+0.8, 10);
+      if (p.type==='invincible') { player.invincible=300; player.invMax=300; }
+      boom(p.x+p.w/2, p.y+p.h/2, '#ff0', 10);
+      powerups.splice(i,1);
+    }
+  }
+
+  // --- 绮掑瓙 ---
+  for (let i=particles.length-1; i>=0; i--) {
+    const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.life-=0.03;
+    if (p.life<=0) particles.splice(i,1);
+  }
+
+  // --- 鐢熸垚鏁屼汉 & Boss ---
+  if (!bossActive) {
+    spawnTimer++;
+    const interval = Math.max(20, 70 - Math.floor(score/3000)*4);
+    if (spawnTimer > interval + Math.random()*20) {
+      spawnTimer = 0;
+      const r = Math.random();
+      if (r<0.45) addEnemy('runner');
+      else if (r<0.75) addEnemy('soldier');
+      else if (r<0.92) addEnemy('turret');
+      else addEnemy('elite');
+    }
+    // Boss鍑哄満锛堟瘡8000鍒嗗乏鍙筹級
+    bossTimeout++;
+    if (bossTimeout > 500 + bossKills*100) { bossTimeout=0; spawnBoss(); }
+  }
+}
+
+function hurtPlayer(pit) {
+  if (pit) {
+    // 鎺夊潙鐩存帴姝?    lives--;
+    boom(player.x+player.w/2, player.y+player.h/2, '#f00', 30);
+    if (lives <= 0) { player.invincible = 9999; paused = true; return; }
+    resetPlayer();
+    player.invincible = 120;
+    return;
+  }
+  if (player.invincible > 0) return;
+  lives--;
+  boom(player.x+player.w/2, player.y+player.h/2, '#f00', 20);
+  if (lives <= 0) { player.invincible = 9999; paused = true; }
+  else player.invincible = 90;
+}
+
+// 淇骞冲彴纰版挒閫昏緫閲嶅啓
+const origUpdate = update;
+update = function() {
+  if (paused) return;
+  frame++;
+
+  let mx = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'])  mx = -1;
+  if (keys['ArrowRight'] || keys['KeyD']) mx = 1;
+  player.vx = mx * player.speed;
+  if (mx !== 0) player.facing = mx;
+
+  if ((keys['Space'] || keys['KeyW'] || keys['ArrowUp'])) {
+    if (player.grounded) {
+      player.vy = -13; player.grounded = false; player.jumped = true;
+    } else if (player.doubleJump && player.jumped) {
+      player.vy = -10; player.jumped = false;
+      boom(player.x+player.w/2, player.y+player.h, '#0ff', 5);
+    }
+  } else { if (player.grounded) player.jumped = false; }
+
+  const prevBottom = player.y + player.h;
+  player.vy += 0.7;
+  player.x += player.vx;
+  player.y += player.vy;
+
+  player.x = Math.max(0, Math.min(player.x, WORLD_W - player.w));
+
+  // 骞冲彴纰版挒
+  player.grounded = false;
+  const allSolids = [...platforms, { x:0, y:GROUND, w:WORLD_W, h:20 }];
+  for (const s of allSolids) {
+    if (player.x+player.w > s.x+2 && player.x < s.x+s.w-2) {
+      const pBottom = player.y + player.h;
+      if (player.vy >= 0 && pBottom >= s.y && prevBottom <= s.y + 6) {
+        player.y = s.y - player.h;
+        player.vy = 0;
+        player.grounded = true;
+        break;
+      }
+    }
+  }
+
+  if (player.y > DEATH_Y) { hurtPlayer(true); return; }
+  if (player.cooldown > 0) player.cooldown--;
+  if (keys['KeyJ'] || keys['KeyF']) fire();
+  if (player.invincible > 0 && player.invincible < 900) player.invincible--;
+  if (player.invMax > 0) { player.invMax--; if (player.invMax<=0) player.invincible=0; }
+
+  const targetCX = player.x - W*0.3;
+  cameraX += (targetCX - cameraX) * 0.08;
+  cameraX = Math.max(0, Math.min(cameraX, WORLD_W - W));
+
+  for (let i=bullets.length-1; i>=0; i--) {
+    const b=bullets[i]; b.x+=b.vx; b.life--;
+    if (b.life<=0||b.x<cameraX-20||b.x>cameraX+W+20) bullets.splice(i,1);
+  }
+  for (let i=enemyBullets.length-1; i>=0; i--) {
+    const b=enemyBullets[i]; b.x+=b.vx; b.y+=b.vy; b.life--;
+    if (b.life<=0||b.x<cameraX-20||b.x>cameraX+W+20||b.y<-20||b.y>H+20) enemyBullets.splice(i,1);
+  }
+
+  for (const e of enemies) { e.x+=e.spd; e.timer++; if (e.shoot&&e.timer%e.shoot===0) enemyShoot(e); if (player.invincible<=0&&rectHit(player,e)) hurtPlayer(false); }
+  for (let i=enemies.length-1; i>=0; i--) {
+    const e=enemies[i];
+    if (e.hp<=0||e.x<cameraX-200) {
+      score+=e.score; boom(e.x+e.w/2,e.y+e.h/2,e.color,e.isBoss?30:15);
+      if (e.isBoss) { bossKills++; bossActive=false; player.doubleJump = true; }
+      if ((e.dropRate&&Math.random()<e.dropRate)||e.isBoss) dropPowerup(e.x+e.w/2,e.y);
+      enemies.splice(i,1);
+    }
+  }
+
+  for (let bi=bullets.length-1; bi>=0; bi--) {
+    for (const e of enemies) { if (rectHit(bullets[bi],e)) { e.hp--; boom(bullets[bi].x,bullets[bi].y,'#ff0',2); bullets.splice(bi,1); break; } }
+  }
+  if (player.invincible<=0) {
+    for (let i=enemyBullets.length-1; i>=0; i--) {
+      if (rectHit(enemyBullets[i],player)) { enemyBullets.splice(i,1); hurtPlayer(false); break; }
+    }
+  }
+
+  for (let i=powerups.length-1; i>=0; i--) {
+    const p=powerups[i]; p.life--;
+    if (p.life<=0) { powerups.splice(i,1); continue; }
+    const gy = findGround(p.x, p.y);
+    if (p.y+p.h < gy) { p.vy+=0.5; p.y+=p.vy; } else { p.y=gy-p.h; p.vy=0; }
+    if (rectHit(player,p)) {
+      if (p.type==='health') lives=Math.min(lives+1,9);
+      if (p.type==='speed') player.speed=Math.min(player.speed+0.8,10);
+      if (p.type==='invincible') { player.invincible=300; player.invMax=300; }
+      boom(p.x+p.w/2,p.y+p.h/2,'#ff0',10); powerups.splice(i,1);
+    }
+  }
+
+  for (let i=particles.length-1; i>=0; i--) {
+    const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.life-=0.03;
+    if (p.life<=0) particles.splice(i,1);
+  }
+
+  if (!bossActive) {
+    spawnTimer++;
+    const interval = Math.max(20, 70-Math.floor(score/3000)*4);
+    if (spawnTimer > interval+Math.random()*20) {
+      spawnTimer=0;
+      const r=Math.random();
+      if (r<0.45) addEnemy('runner'); else if (r<0.75) addEnemy('soldier');
+      else if (r<0.92) addEnemy('turret'); else addEnemy('elite');
+    }
+    bossTimeout++;
+    if (bossTimeout > 500+bossKills*100) { bossTimeout=0; spawnBoss(); }
+  }
+};
+
+// ============ 娓叉煋 ============
+function draw() {
+  // 澶╃┖
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#0a0a2e'); g.addColorStop(0.65,'#1a1a3e'); g.addColorStop(1,'#2d1f0e');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  // 鏄熸槦
+  for (let i=0; i<40; i++) {
+    const sx = ((i*137+42)-cameraX*0.05) % W;
+    const sy = (i*73+17) % (H*0.6);
+    ctx.fillStyle=`rgba(255,255,255,${Math.sin(frame*0.02+i)*0.3+0.3})`;
+    ctx.fillRect((sx+W)%W, sy, 2, 2);
+  }
+
+  // 杩滃北
+  ctx.fillStyle='#1a1a2e';
+  for (let i=0; i<3; i++) {
+    const ox = ((i*400-cameraX*0.2)%900+900)%900-100;
+    ctx.beginPath(); ctx.moveTo(ox-100,GROUND); ctx.lineTo(ox+50,GROUND-80-i*25); ctx.lineTo(ox+200,GROUND); ctx.fill();
+  }
+
+  // 鍦伴潰
+  ctx.fillStyle='#2d5016'; ctx.fillRect(0,GROUND,W,H-GROUND);
+  ctx.fillStyle='#1a3308';
+  for (let x=((-cameraX*0.5)%40+40)%40; x<W; x+=40) ctx.fillRect(x,GROUND+1,38,H-GROUND);
+  ctx.strokeStyle='#4a7a2e'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(0,GROUND); ctx.lineTo(W,GROUND); ctx.stroke();
+
+  // 娴┖骞冲彴
+  ctx.fillStyle='#5a3a1a'; ctx.strokeStyle='#8a6a3a'; ctx.lineWidth=2;
+  for (const p of platforms) {
+    const px = p.x - cameraX;
+    if (px+p.w<0||px>W) continue;
+    ctx.fillRect(px, p.y, p.w, p.h);
+    ctx.strokeRect(px, p.y, p.w, p.h);
+  }
+
+  // 娣辨笂鏍囪
+  ctx.fillStyle='rgba(255,0,0,0.15)';
+  ctx.fillRect(0, GROUND+10, W, H-GROUND-10);
+
+  // 绮掑瓙
+  for (const p of particles) {
+    const px=p.x-cameraX; ctx.fillStyle=p.color; ctx.globalAlpha=p.life;
+    ctx.fillRect(px-p.size/2, p.y-p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha=1;
+
+  // 閬撳叿
+  for (const p of powerups) {
+    const px=p.x-cameraX; if (px+p.w<0||px>W) continue;
+    const blink = Math.sin(frame*0.1+p.x)*0.3+0.7; ctx.globalAlpha=blink;
+    if (p.type==='health') { ctx.fillStyle='#f00'; ctx.fillRect(px,p.y+8,p.w,6); ctx.fillRect(px+8,p.y,6,p.h); }
+    if (p.type==='speed') { ctx.fillStyle='#0ff'; ctx.beginPath(); ctx.moveTo(px,p.y+p.h/2); ctx.lineTo(px+p.w,p.y); ctx.lineTo(px+p.w,p.y+p.h); ctx.closePath(); ctx.fill(); }
+    if (p.type==='invincible') { ctx.fillStyle='#ff0'; ctx.fillRect(px+2,p.y,8,p.h); ctx.fillRect(px,p.y+2,p.w,7); }
+    ctx.globalAlpha=1;
+  }
+
+  // 瀛愬脊
+  ctx.fillStyle='#ffeb3b'; for (const b of bullets) ctx.fillRect(b.x-cameraX-2,b.y-1,6,3);
+  ctx.fillStyle='#ff4444'; for (const b of enemyBullets) ctx.fillRect(b.x-cameraX-2,b.y-2,5,5);
+
+  // 鏁屼汉
+  for (const e of enemies) {
+    const ex=e.x-cameraX; if (ex+e.w<0||ex>W) continue;
+    ctx.fillStyle=e.color;
+    if (e.isTurret) {
+      ctx.fillRect(ex+2,e.y+4,e.w-4,e.h-4);
+      ctx.fillStyle='#333'; ctx.fillRect(ex+e.w/2-3,e.y-6,6,12);
+      ctx.fillStyle='#f39c12'; ctx.fillRect(ex+e.w/2-2,e.y-2,4,4);
+    } else if (e.isBoss) {
+      // Boss 澶ф満浣?      ctx.fillStyle='#c0392b'; ctx.fillRect(ex,e.y+10,e.w,e.h-10);
+      ctx.fillStyle='#e74c3c'; ctx.fillRect(ex+8,e.y,e.w-16,16);
+      ctx.fillStyle='#f00'; const ed=player.x>e.x?1:-1;
+      ctx.fillRect(ex+(ed>0?e.w*0.7:e.w*0.2),e.y+6,8,6);
+      ctx.fillStyle='#ff0'; ctx.fillRect(ex+e.w/2-6,e.y-14,12,8);
+      // 琛€鏉?      ctx.fillStyle='#333'; ctx.fillRect(ex,e.y-22,e.w,6);
+      ctx.fillStyle='#e74c3c'; ctx.fillRect(ex,e.y-22,e.w*e.hp/e.maxHp,6);
+      ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.fillText('BOSS',ex+e.w/2-15,e.y-24);
+    } else {
+      ctx.fillRect(ex+4,e.y+10,e.w-8,e.h-16);
+      ctx.fillStyle='#d4a574'; ctx.fillRect(ex+6,e.y+3,14,10);
+      ctx.fillStyle='#5d4037'; ctx.fillRect(ex+5,e.y,16,6);
+      ctx.fillStyle='#f00'; const ed=player.x>e.x?1:-1;
+      ctx.fillRect(ex+(ed>0?14:3),e.y+5,3,3);
+      ctx.fillStyle='#555'; ctx.fillRect(ex+(ed>0?20:-5),e.y+14,8,3);
+      const la=Math.sin(e.timer*0.3)*2;
+      ctx.fillStyle='#2c3e50'; ctx.fillRect(ex+7,e.y+e.h-10,5,10+la); ctx.fillRect(ex+14,e.y+e.h-10,5,10-la);
+    }
+    if (!e.isBoss&&!e.isTurret&&e.hp<e.maxHp) {
+      ctx.fillStyle='#333'; ctx.fillRect(ex,e.y-8,e.w,3);
+      ctx.fillStyle='#e74c3c'; ctx.fillRect(ex,e.y-8,e.w*e.hp/e.maxHp,3);
+    }
+  }
+
+  // 鐜╁
+  if (player.invincible<999||frame%6<3) {
+    const px=player.x-cameraX, py=player.y;
+    // 鏃犳晫闂儊
+    if (player.invincible>0&&player.invincible<900&&frame%6<3) {} else {
+      ctx.globalAlpha = player.invincible>0&&player.invincible<900 ? 0.4 : 1;
+      ctx.fillStyle='#3498db'; ctx.fillRect(px+6,py+12,16,18);
+      ctx.fillStyle='#e8b88a'; ctx.fillRect(px+8,py+2,12,12);
+      ctx.fillStyle='#2c3e50'; ctx.fillRect(px+6,py,16,6);
+      ctx.fillStyle='#fff'; ctx.fillRect(player.facing>0?px+16:px+8,py+4,4,3);
+      ctx.fillStyle='#7f8c8d';
+      if (player.facing>0) ctx.fillRect(px+18,py+16,10,4); else ctx.fillRect(px,py+16,10,4);
+      const la=player.grounded?Math.sin(frame*0.4)*3:1;
+      ctx.fillStyle='#1a5276'; ctx.fillRect(px+8,py+30,5,10+la); ctx.fillRect(px+15,py+30,5,10-la);
+      ctx.fillStyle='#2c3e50'; ctx.fillRect(px+7,py+38+Math.max(0,la),7,3); ctx.fillRect(px+14,py+38+Math.max(0,-la),7,3);
+      ctx.globalAlpha=1;
+    }
+  }
+
+  // HUD
+  ctx.fillStyle='#0f0'; ctx.font='bold 14px monospace';
+  ctx.fillText(`SCORE: ${score}`, 14, 22);
+  ctx.fillText(`LIVES: ${'鈾?.repeat(Math.min(lives,9))}`, 14, 42);
+  ctx.fillText(`BOSS: ${bossKills}`, 14, 62);
+
+  // 鐘舵€佹爮
+  let statusText = '';
+  if (player.invincible>0&&player.invincible<900) statusText='馃洝锔?鏃犳晫';
+  if (player.speed>5) statusText += ` 鈿${player.speed.toFixed(1)}`;
+  if (player.doubleJump) statusText += ' 馃浜屾璺?;
+  if (bossActive) statusText += ' 鈿狅笍BOSS';
+  ctx.fillStyle='#ff0'; ctx.font='12px monospace';
+  ctx.fillText(statusText, 14, 82);
+
+  ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.font='11px monospace';
+  ctx.fillText('[鈫?鈫抅绉诲姩 [Space/W/鈫慮璺?[J/F]灏?[P]鏆傚仠 [R]閲嶆潵', W-370, 20);
+  ctx.fillText(`BOSS杩涘害: ${bossTimeout}/500`, W-200, 40);
+
+  // 姝讳骸
+  if (paused) {
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#e74c3c'; ctx.font='bold 48px monospace'; ctx.textAlign='center';
+    ctx.fillText('GAME OVER', W/2, H/2-20);
+    ctx.fillStyle='#fff'; ctx.font='18px monospace';
+    ctx.fillText(`寰楀垎: ${score}  鍑绘潃Boss: ${bossKills}`, W/2, H/2+20);
+    ctx.fillText('鎸?[R] 閲嶆柊寮€濮?, W/2, H/2+50);
+    ctx.textAlign='left';
+  }
+}
+
+function restart() {
+  resetPlayer();
+  score=0; lives=3; bossKills=0; paused=false; frame=0;
+  bossActive=false; bossTimeout=0; spawnTimer=0;
+  bullets=[]; enemies=[]; enemyBullets=[]; powerups=[]; particles=[];
+  player.invincible=0; player.invMax=0; player.speed=5; player.doubleJump=false;
+  buildPlatforms();
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>
